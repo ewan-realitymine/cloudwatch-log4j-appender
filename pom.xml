@@ -13,25 +13,25 @@
 
     <groupId>com.vi</groupId>
     <artifactId>cloudwatch-log4j-appender</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.1-log4j1</version>
 
     <dependencies>
         <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-core</artifactId>
-            <version>2.1</version>
+            <groupId>log4j</groupId>
+            <artifactId>log4j</artifactId>
+            <version>1.2.17</version>
         </dependency>
 
         <dependency>
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk-logs</artifactId>
-            <version>1.9.30</version>
+            <version>1.10.12</version>
         </dependency>
 
         <dependency>
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk-cloudwatch</artifactId>
-            <version>1.9.30</version>
+            <version>1.10.12</version>
         </dependency>
 
     </dependencies>

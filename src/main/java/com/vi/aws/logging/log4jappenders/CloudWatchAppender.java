@@ -2,16 +2,11 @@ package com.vi.aws.logging.log4jappenders;
 
 import com.amazonaws.services.logs.AWSLogsClient;
 import com.amazonaws.services.logs.model.*;
-import org.apache.logging.log4j.core.Layout;
-import org.apache.logging.log4j.core.LogEvent;
-import org.apache.logging.log4j.core.appender.AbstractAppender;
-import org.apache.logging.log4j.core.config.plugins.Plugin;
-import org.apache.logging.log4j.core.config.plugins.PluginAttribute;
-import org.apache.logging.log4j.core.config.plugins.PluginElement;
-import org.apache.logging.log4j.core.config.plugins.PluginFactory;
-import org.apache.logging.log4j.core.layout.PatternLayout;
+import org.apache.log4j.AppenderSkeleton;
+import org.apache.log4j.Layout;
+import org.apache.log4j.PatternLayout;
+import org.apache.log4j.spi.LoggingEvent;
 
-import java.io.Serializable;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
@@ -21,8 +16,7 @@ import static com.vi.aws.logging.log4jappenders.Config.*;
 /**
  * Created by mihailo.despotovic on 4/8/15.
  */
-@Plugin(name = "CloudWatchAppender", category = "Core", elementType = "appender", printObject = true)
-public class CloudWatchAppender extends AbstractAppender {
+public class CloudWatchAppender extends AppenderSkeleton {
 
     private final SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy.MM.dd HH.mm.ss"); // aws doesn't allow ":" in stream name
 
@@ -44,25 +38,14 @@ public class CloudWatchAppender extends AbstractAppender {
     private AWSLogsClient awsLogsClient = null;
     private volatile boolean queueFull = false;
 
-    @PluginFactory
-    public static CloudWatchAppender createAppender(@PluginAttribute("name") String name,
-                                                       @PluginAttribute("awsLogGroupName") String awsLogGroupName,
-                                                       @PluginAttribute("awsLogStreamName") String awsLogStreamName,
-                                                       @PluginAttribute("awsLogStreamFlushPeriodInSeconds") String awsLogStreamFlushPeriodInSeconds,
-                                                       @PluginElement("Layout") Layout<Serializable> layout) {
-        return new CloudWatchAppender(
-                name == null ? DEFAULT_LOG_APPENDER_NAME : name,
-                awsLogGroupName == null ? DEFAULT_AWS_LOG_GROUP_NAME : awsLogGroupName,
-                awsLogStreamName,
-                awsLogStreamFlushPeriodInSeconds, layout);
-    }
-
     private CloudWatchAppender(final String name,
                                final String awsLogGroupName,
                                final String awsLogStreamName,
                                final String awsLogStreamFlushPeriodInSeconds,
-                               final Layout<Serializable> layout) {
-        super(name, null, layout == null ? PatternLayout.createDefaultLayout() : layout, false);
+                               final Layout layout) {
+
+        setName(name);
+        setLayout(layout == null ? new PatternLayout() : layout);
 
         // figure out the flush period
         int flushPeriod = AWS_LOG_STREAM_FLUSH_PERIOD_IN_SECONDS;
@@ -98,6 +81,10 @@ public class CloudWatchAppender extends AbstractAppender {
                 this.sequenceTokenCache = createLogGroupAndLogStreamIfNeeded(logGroupName, finalLogStreamName);
             } while (this.sequenceTokenCache != null);
             logStreamName = finalLogStreamName;
+
+            debug("Starting cloudWatchAppender for: " + logGroupName + ":" + logStreamName);
+            deliveryThread = new Thread(messageProcessor, "CloudWatchAppenderDeliveryThread");
+            deliveryThread.start();
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -179,11 +166,10 @@ public class CloudWatchAppender extends AbstractAppender {
     /**
      * Create AWS log event based on the log4j log event and add it to the queue.
      */
-    @Override
-    public void append(final LogEvent event) {
+    public void append(final LoggingEvent event) {
         final InputLogEvent awsLogEvent = new InputLogEvent();
-        final long timestamp = event.getTimeMillis();
-        final String message = new String(getLayout().toByteArray(event));
+        final long timestamp = event.getTimeStamp();
+        final String message = getLayout().format(event);
         awsLogEvent.setTimestamp(timestamp);
         awsLogEvent.setMessage(message);
         if (!queue.offer(awsLogEvent) && !queueFull) {
@@ -239,17 +225,11 @@ public class CloudWatchAppender extends AbstractAppender {
 
     // tiny helper self-describing methods
 
-    @Override
-    public void start() {
-        super.start();
-        debug("Starting cloudWatchAppender for: " + logGroupName + ":" + logStreamName);
-        deliveryThread = new Thread(messageProcessor, "CloudWatchAppenderDeliveryThread");
-        deliveryThread.start();
-    }
+    private String getTimeNow() { return simpleDateFormat.format(new Date()); }
+    private void debug(final String s) { System.out.println(getTimeNow() + " CloudWatchAppender: " + s); }
 
     @Override
-    public void stop() {
-        super.stop();
+    public void close() {
         shutdown = true;
         if (deliveryThread != null) {
             synchronized (monitor) {
@@ -266,6 +246,8 @@ public class CloudWatchAppender extends AbstractAppender {
         }
     }
 
-    private String getTimeNow() { return simpleDateFormat.format(new Date()); }
-    private void debug(final String s) { System.out.println(getTimeNow() + " CloudWatchAppender: " + s); }
+    @Override
+    public boolean requiresLayout() {
+        return true;
+    }
 }
