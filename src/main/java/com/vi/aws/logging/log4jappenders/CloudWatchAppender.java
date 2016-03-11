@@ -38,7 +38,7 @@ public class CloudWatchAppender extends AppenderSkeleton {
     private AWSLogsClient awsLogsClient = null;
     private volatile boolean queueFull = false;
 
-    private CloudWatchAppender(final String name,
+    public CloudWatchAppender(final String name,
                                final String awsLogGroupName,
                                final String awsLogStreamName,
                                final String awsLogStreamFlushPeriodInSeconds,
