@@ -1,5 +1,9 @@
 package com.vi.aws.logging.log4jappenders;
 
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.AWSCredentialsProvider;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.regions.RegionUtils;
 import com.amazonaws.services.logs.AWSLogsClient;
 import com.amazonaws.services.logs.model.*;
 import org.apache.log4j.AppenderSkeleton;
@@ -18,69 +22,65 @@ import static com.vi.aws.logging.log4jappenders.Config.*;
  */
 public class CloudWatchAppender extends AppenderSkeleton {
 
-    private final SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy.MM.dd HH.mm.ss"); // aws doesn't allow ":" in stream name
+    private final SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy.MM.dd HH.mm.ss"); // aws doesn't allow
+                                                                                                   // ":" in stream name
 
     private static final String AWS_INSTANCE_ID; // per-instance, so static
-    static { AWS_INSTANCE_ID = retrieveInstanceId(); }
+
+    static {
+        AWS_INSTANCE_ID = retrieveInstanceId();
+    }
 
     private final BlockingQueue<InputLogEvent> queue = new LinkedBlockingQueue<>(AWS_LOG_STREAM_MAX_QUEUE_DEPTH);
     private volatile boolean shutdown = false;
-    private final int flushPeriodMillis;
+    private int flushPeriodMillis = AWS_LOG_STREAM_FLUSH_PERIOD_IN_SECONDS * 1000;
     private Thread deliveryThread;
     private final Object monitor = new Object();
 
-    private String sequenceTokenCache = null; // aws doc: "Every PutLogEvents request must include the sequenceToken obtained from the response of the previous request.
+    private String sequenceTokenCache = null; // aws doc: "Every PutLogEvents request must include the sequenceToken
+                                              // obtained from the response of the previous request.
     private long lastReportedTimestamp = -1;
 
-    private String logGroupName;
+    private String logGroupName = DEFAULT_AWS_LOG_GROUP_NAME;
     private String logStreamName;
+    private String regionName;
+    private String accessKey;
+    private String secretKey;
 
     private AWSLogsClient awsLogsClient = null;
     private volatile boolean queueFull = false;
 
-    public CloudWatchAppender(final String name,
-                               final String awsLogGroupName,
-                               final String awsLogStreamName,
-                               final String awsLogStreamFlushPeriodInSeconds,
-                               final Layout layout) {
+    public CloudWatchAppender() {
+    }
 
-        setName(name);
-        setLayout(layout == null ? new PatternLayout() : layout);
+    @Override
+    public void activateOptions() {
 
-        // figure out the flush period
-        int flushPeriod = AWS_LOG_STREAM_FLUSH_PERIOD_IN_SECONDS;
-        if (awsLogStreamFlushPeriodInSeconds != null) {
-            try {
-                flushPeriod = Integer.parseInt(awsLogStreamFlushPeriodInSeconds);
-            } catch (NumberFormatException nfe) {
-                debug("Bad awsLogStreamFlushPeriodInSeconds (" + awsLogStreamFlushPeriodInSeconds + "), defaulting to: " + AWS_LOG_STREAM_FLUSH_PERIOD_IN_SECONDS + "s");
-            }
-        } else {
-            debug("No awsLogStreamFlushPeriodInSeconds specified, defaulted to " + AWS_LOG_STREAM_FLUSH_PERIOD_IN_SECONDS + "s");
+        if (getLayout() == null) {
+            setLayout(new PatternLayout());
         }
-        flushPeriodMillis = flushPeriod * 1000;
 
         try {
 
-            awsLogsClient = new AWSLogsClient(); // this should pull the credentials automatically from the environment
-
-            // set the group name
-            this.logGroupName = awsLogGroupName;
-
-            // determine the stream name (prefix) and suffix it with the timestamp to ensure uniqueness
-            String logStreamNamePrefix = awsLogStreamName;
-            if (logStreamNamePrefix == null) {
-                logStreamNamePrefix = ENV_LOG_STREAM_NAME;
+            if (accessKey != null && secretKey != null) {
+                BasicAWSCredentials creds = new BasicAWSCredentials(accessKey, secretKey);
+                awsLogsClient = new AWSLogsClient(creds);
+            } else {
+                awsLogsClient = new AWSLogsClient(); // this should pull the credentials automatically from the
+                                                     // environment
             }
-            if (logStreamNamePrefix == null) {
-                logStreamNamePrefix = AWS_INSTANCE_ID;
+
+            if (regionName != null)
+                awsLogsClient.setRegion(RegionUtils.getRegion(regionName));
+
+            if (logStreamName == null) {
+                logStreamName = ENV_LOG_STREAM_NAME;
             }
-            String finalLogStreamName;
-            do {
-                finalLogStreamName = logStreamNamePrefix + " " + getTimeNow();
-                this.sequenceTokenCache = createLogGroupAndLogStreamIfNeeded(logGroupName, finalLogStreamName);
-            } while (this.sequenceTokenCache != null);
-            logStreamName = finalLogStreamName;
+            if (logStreamName == null) {
+                logStreamName = AWS_INSTANCE_ID;
+            }
+
+            this.sequenceTokenCache = createLogGroupAndLogStreamIfNeeded(logGroupName, logStreamName);
 
             debug("Starting cloudWatchAppender for: " + logGroupName + ":" + logStreamName);
             deliveryThread = new Thread(messageProcessor, "CloudWatchAppenderDeliveryThread");
@@ -133,9 +133,9 @@ public class CloudWatchAppender extends AppenderSkeleton {
                 }
             });
             if (lastReportedTimestamp > 0) {
-                //in the off chance that the new events start with older TS than the last sent event
-                //reset their timestamps to the last timestamp until we reach an event with
-                //higher timestamp
+                // in the off chance that the new events start with older TS than the last sent event
+                // reset their timestamps to the last timestamp until we reach an event with
+                // higher timestamp
                 for (InputLogEvent event : logEvents) {
                     if (event.getTimestamp() < lastReportedTimestamp)
                         event.setTimestamp(lastReportedTimestamp);
@@ -144,10 +144,12 @@ public class CloudWatchAppender extends AppenderSkeleton {
                 }
             }
             lastReportedTimestamp = logEvents.get(logEvents.size() - 1).getTimestamp();
-            final PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(logGroupName, logStreamName, logEvents);
+            final PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(logGroupName, logStreamName,
+                    logEvents);
             putLogEventsRequest.setSequenceToken(sequenceTokenCache);
             try {
-                final PutLogEventsResult putLogEventsResult = awsLogsClient.putLogEvents(putLogEventsRequest); // 1 MB or 10000 messages AWS cap!
+                // 1 MB or 10000 messages AWS cap!
+                final PutLogEventsResult putLogEventsResult = awsLogsClient.putLogEvents(putLogEventsRequest);
                 sequenceTokenCache = putLogEventsResult.getNextSequenceToken();
             } catch (final DataAlreadyAcceptedException daae) {
                 debug("DataAlreadyAcceptedException, will reset the token to the expected one");
@@ -180,16 +182,18 @@ public class CloudWatchAppender extends AppenderSkeleton {
     }
 
     /**
-     * Create log group ans log stream if needed.
+     * Create log group and log stream if needed.
      *
-     * @param logGroupName  the name of the log group
+     * @param logGroupName the name of the log group
      * @param logStreamName the name of the stream
      * @return sequence token for the created stream
      */
     private String createLogGroupAndLogStreamIfNeeded(String logGroupName, String logStreamName) {
-        final DescribeLogGroupsResult describeLogGroupsResult = awsLogsClient.describeLogGroups(new DescribeLogGroupsRequest().withLogGroupNamePrefix(logGroupName));
+        final DescribeLogGroupsResult describeLogGroupsResult = awsLogsClient
+                .describeLogGroups(new DescribeLogGroupsRequest().withLogGroupNamePrefix(logGroupName));
         boolean createLogGroup = true;
-        if (describeLogGroupsResult != null && describeLogGroupsResult.getLogGroups() != null && !describeLogGroupsResult.getLogGroups().isEmpty()) {
+        if (describeLogGroupsResult != null && describeLogGroupsResult.getLogGroups() != null
+                && !describeLogGroupsResult.getLogGroups().isEmpty()) {
             for (final LogGroup lg : describeLogGroupsResult.getLogGroups()) {
                 if (logGroupName.equals(lg.getLogGroupName())) {
                     createLogGroup = false;
@@ -204,9 +208,12 @@ public class CloudWatchAppender extends AppenderSkeleton {
         }
         String logSequenceToken = null;
         boolean createLogStream = true;
-        final DescribeLogStreamsRequest describeLogStreamsRequest = new DescribeLogStreamsRequest(logGroupName).withLogStreamNamePrefix(logStreamName);
-        final DescribeLogStreamsResult describeLogStreamsResult = awsLogsClient.describeLogStreams(describeLogStreamsRequest);
-        if (describeLogStreamsResult != null && describeLogStreamsResult.getLogStreams() != null && !describeLogStreamsResult.getLogStreams().isEmpty()) {
+        final DescribeLogStreamsRequest describeLogStreamsRequest = new DescribeLogStreamsRequest(logGroupName)
+                .withLogStreamNamePrefix(logStreamName);
+        final DescribeLogStreamsResult describeLogStreamsResult = awsLogsClient
+                .describeLogStreams(describeLogStreamsRequest);
+        if (describeLogStreamsResult != null && describeLogStreamsResult.getLogStreams() != null
+                && !describeLogStreamsResult.getLogStreams().isEmpty()) {
             for (final LogStream ls : describeLogStreamsResult.getLogStreams()) {
                 if (logStreamName.equals(ls.getLogStreamName())) {
                     createLogStream = false;
@@ -217,7 +224,8 @@ public class CloudWatchAppender extends AppenderSkeleton {
 
         if (createLogStream) {
             debug("Creating logStream: " + logStreamName);
-            final CreateLogStreamRequest createLogStreamRequest = new CreateLogStreamRequest(logGroupName, logStreamName);
+            final CreateLogStreamRequest createLogStreamRequest = new CreateLogStreamRequest(logGroupName,
+                    logStreamName);
             awsLogsClient.createLogStream(createLogStreamRequest);
         }
         return logSequenceToken;
@@ -225,8 +233,13 @@ public class CloudWatchAppender extends AppenderSkeleton {
 
     // tiny helper self-describing methods
 
-    private String getTimeNow() { return simpleDateFormat.format(new Date()); }
-    private void debug(final String s) { System.out.println(getTimeNow() + " CloudWatchAppender: " + s); }
+    private String getTimeNow() {
+        return simpleDateFormat.format(new Date());
+    }
+
+    private void debug(final String s) {
+        System.out.println(getTimeNow() + " CloudWatchAppender: " + s);
+    }
 
     @Override
     public void close() {
@@ -250,4 +263,95 @@ public class CloudWatchAppender extends AppenderSkeleton {
     public boolean requiresLayout() {
         return true;
     }
+
+    /**
+     * Returns the AWS log group name
+     * 
+     * @return
+     */
+    public String getLogGroupName() {
+        return logGroupName;
+    }
+
+    /**
+     * Sets the AWS log group name
+     * 
+     * @param logGroupName
+     */
+    public void setLogGroupName(String logGroupName) {
+        this.logGroupName = logGroupName;
+    }
+
+    /**
+     * Returns the AWS log stream name
+     * 
+     * @return
+     */
+    public String getLogStreamName() {
+        return logStreamName;
+    }
+
+    /**
+     * Sets the AWS log stream name
+     * 
+     * @param logStreamName
+     */
+    public void setLogStreamName(String logStreamName) {
+        this.logStreamName = logStreamName;
+    }
+
+    /**
+     * Sets the log stream flush period
+     * 
+     * @param seconds flush period in seconds
+     */
+    public void setLogStreamFlushPeriodInSeconds(int seconds) {
+        this.flushPeriodMillis = seconds * 1000;
+    }
+
+    /**
+     * Returns the log stream flush period
+     * 
+     * @return flush period in seconds
+     */
+    public int getLogStreamFlushPeriodInSeconds() {
+        return this.flushPeriodMillis / 1000;
+    }
+
+    /**
+     * Returns the AWS region
+     * 
+     * @return
+     */
+    public String getAwsRegion() {
+        return regionName;
+    }
+
+    /**
+     * Sets the AWS region
+     * 
+     * @param regionName
+     */
+    public void setAwsRegion(String regionName) {
+        this.regionName = regionName;
+    }
+
+    /**
+     * Sets the AWS access key
+     * 
+     * @param accessKey
+     */
+    public void setAwsAccessKey(String accessKey) {
+        this.accessKey = accessKey;
+    }
+
+    /**
+     * Sets the AWS secret key
+     * 
+     * @param secretKey
+     */
+    public void setAwsSecretKey(String secretKey) {
+        this.secretKey = secretKey;
+    }
+
 }
